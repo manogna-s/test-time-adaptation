@@ -365,6 +365,7 @@ def complete_data_dir_path(root, dataset_name):
                "imagenet_d109": "imagenet-d",   # do not change
                "domainnet126": "DomainNet-126", # directory containing the 6 splits of "cleaned versions" from http://ai.bu.edu/M3SDA/#dataset
                "office31": "office-31",
+               "officehome": "office-home",
                "visda": "visda-2017",
                "cifar10": "",  # do not change the following values
                "cifar10_c": "",
@@ -410,7 +411,8 @@ def adaptation_method_lookup(adaptation):
                     "rotta": "RoTTA",
                     "gtta": "GTTA",
                     "rmt": "RMT",
-                    "roid": "ROID"
+                    "roid": "ROID",
+                    "acl_adacontrast": "AclAdaContrast"
                     }
     assert adaptation in lookup_table.keys(), \
         f"Adaptation method '{adaptation}' is not supported! Choose from: {list(lookup_table.keys())}"

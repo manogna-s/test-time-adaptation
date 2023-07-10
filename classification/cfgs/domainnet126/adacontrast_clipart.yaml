@@ -3,9 +3,9 @@ CORRUPTION:
   SEVERITY:
     - 5
   TYPE:
-    - clipart
-    - painting
     - sketch
+    - real
+    - painting
 MODEL:
   ADAPTATION: adacontrast
   ARCH: resnet50
@@ -19,5 +19,5 @@ OPTIM:
 CONTRAST:
   TEMPERATURE: 0.07
 TEST:
-  BATCH_SIZE: 128
-CKPT_PATH: "./ckpt/domainnet126/best_real_2020.pth"
+  BATCH_SIZE: 64
+CKPT_PATH: "./ckpt/domainnet126/best_clipart_2020.pth"

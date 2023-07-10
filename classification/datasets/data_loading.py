@@ -92,7 +92,7 @@ def get_test_loader(setting, adaptation, dataset_name, root_dir, domain_name, se
                                                     setting=setting)
         elif dataset_name in {"imagenet_k", "imagenet_r", "imagenet_a"}:
             test_dataset = torchvision.datasets.ImageFolder(root=data_dir, transform=transform)
-        elif dataset_name in {"imagenet_d", "imagenet_d109", "domainnet126", "office31", "visda"}:
+        elif dataset_name in {"imagenet_d", "imagenet_d109", "domainnet126", "office31", "visda", "officehome"}:
             # create the symlinks needed for imagenet-d variants
             if dataset_name in {"imagenet_d", "imagenet_d109"}:
                 for dom_name in domain_names_all:
@@ -107,6 +107,7 @@ def get_test_loader(setting, adaptation, dataset_name, root_dir, domain_name, se
             else:
                 data_files = [os.path.join("datasets", f"{dataset_name}_lists", domain_name + "_list.txt")]
 
+            print(data_dir, data_files)
             test_dataset = ImageList(image_root=data_dir,
                                      label_files=data_files,
                                      transform=transform)
