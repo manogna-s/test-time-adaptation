@@ -3,12 +3,12 @@ CORRUPTION:
   SEVERITY:
     - 5
   TYPE:
-    - clipart
-    - painting
+    # - clipart
+    # - painting
     - sketch
 MODEL:
   ADAPTATION: source
   ARCH: resnet50
 TEST:
   BATCH_SIZE: 128
-CKPT_PATH: "./ckpt/domainnet126/best_real_2020.pth"
+CKPT_PATH: "./ckpt/domainnet126/best_clipart_2020.pth"

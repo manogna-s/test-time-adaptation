@@ -5,12 +5,13 @@ Corresponding paper: https://arxiv.org/abs/2204.10377
 
 import logging
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
 
-from methods.base import TTAMethod
+from acl_methods.acl_base import ACL_TTAMethod
 from models.model import BaseModel
 
 
@@ -57,6 +58,13 @@ class AdaMoCo(nn.Module):
         self.register_buffer("mem_labels", torch.randint(0, src_model.num_classes, (K,)))
         self.mem_feat = F.normalize(self.mem_feat, dim=0)
 
+        # create a bank for active samples
+        self.act_K = 1000
+        self.act_queue_ptr = 0
+        self.register_buffer("act_feat", torch.zeros(feature_dim, 1000))
+        self.register_buffer("act_labels", 1000 * torch.ones((1000,), dtype=torch.long))
+
+
         if checkpoint_path:
             self.load_from_checkpoint(checkpoint_path)
 
@@ -96,7 +104,20 @@ class AdaMoCo(nn.Module):
         self.mem_labels[idxs_replace] = pseudo_labels
         self.queue_ptr = end % self.K
 
-    def forward(self, im_q, im_k=None, cls_only=False):
+    @torch.no_grad()
+    def update_active_memory(self, act_keys, act_labels):
+        """
+        Update features and corresponding pseudo labels
+        """
+
+        start = self.act_queue_ptr
+        end = start + len(act_keys)
+        idxs_replace = torch.arange(start, end).cuda() % self.act_K
+        self.act_feat[:, idxs_replace] = act_keys.T
+        self.act_labels[idxs_replace] = act_labels
+        self.act_queue_ptr = end % self.act_K
+
+    def forward(self, im_q, im_k=None, cls_only=False, pl=None):
         """
         Input:
             im_q: a batch of query images
@@ -130,17 +151,70 @@ class AdaMoCo(nn.Module):
         # negative logits: NxK
         l_neg = torch.einsum("nc,ck->nk", [q, self.mem_feat.clone().detach()])
 
+        print(l_pos.shape, l_neg.shape)
         # logits: Nx(1+K)
         logits_ins = torch.cat([l_pos, l_neg], dim=1)
 
         # apply temperature
         logits_ins /= self.T_moco
 
+        # ---------------------- ACL samples -----------------------
+        act_labels = self.act_labels[:self.act_queue_ptr]
+        # print(act_labels)
+        act_labels = (act_labels.T).expand(q.shape[0] ,-1)
+        # print(act_labels)
+        # print(act_labels)
+        logits_ins_cls = None
+        sel_idx = np.array([-1])
+        if self.act_queue_ptr>0:
+            # print(pl.shape)
+            pl = pl.unsqueeze(1)
+            check = (pl == act_labels)
+            # print(check)
+            # print(torch.sum(check, dim=1))
+            idx = torch.nonzero(check)
+            # print(idx)
+
+            check = check.cpu().numpy()
+
+
+            sel_idx = np.array([np.random.choice(r.nonzero()[0]) if (r.nonzero()[0].any() ==True) else -1 for r in check])
+
+            # sel_idx = torch.tensor([r  for r in check])
+            # print(sel_idx)
+
+
+            if np.sum(sel_idx > -1) > 0:
+
+                q_cls = q[sel_idx>-1]
+                k_cls = (self.act_feat[:, sel_idx].T)[sel_idx>-1]
+                # print(q_sel.shape, k_sel.shape)
+                # print(k_sel[0])
+                # print(self.act_feat[:, 2])
+
+                l_pos_cls = torch.einsum("nc,nc->n", [q_cls, k_cls]).unsqueeze(-1)
+
+                l_neg_cls = torch.einsum("nc,ck->nk", [q_cls, self.act_feat.clone().detach()])
+
+                # print(l_pos_cls.shape)
+                logits_ins_cls = torch.cat([l_pos_cls, l_neg_cls], dim=1)
+                # print(logits_ins_cls.shape)
+
+
+
+                # cdcvd
+
+            # print(pl.expand(pl.shape[0], act_labels.shape[1]))
+            # print(pl.expand(-1, act_labels.shape[1])==act_labels)
+
+        # ---------------------- ACL samples -----------------------
+
+
         # dequeue and enqueue will happen outside
-        return feats_q, logits_q, logits_ins, k
+        return feats_q, logits_q, logits_ins, k, logits_ins_cls, sel_idx
 
 
-class AdaContrast(TTAMethod):
+class AclAdaContrast(ACL_TTAMethod):
     def __init__(self, cfg, model, num_classes):
         super().__init__(cfg, model, num_classes)
 
@@ -160,6 +234,10 @@ class AdaContrast(TTAMethod):
         self.refine_method = cfg.ADACONTRAST.REFINE_METHOD
         self.num_neighbors = cfg.ADACONTRAST.NUM_NEIGHBORS
 
+        # active learning parameters
+        self.num_active_samples = cfg.ACL.NUM_ACTIVE_SAMPLES
+        self.acl_strategy = cfg.ACL.STRATEGY
+
         self.first_X_samples = 0
 
         if self.dataset_name != "domainnet126":
@@ -178,6 +256,9 @@ class AdaContrast(TTAMethod):
                         T_moco=self.T_moco,
                         ).cuda()
 
+        print(self.model.K)
+        print(self.queue_size)
+
         self.banks = {
             "features": torch.tensor([], device="cuda"),
             "probs": torch.tensor([], device="cuda"),
@@ -189,12 +270,12 @@ class AdaContrast(TTAMethod):
         self.models = [self.src_model, self.momentum_model]
         self.model_states, self.optimizer_state = self.copy_model_and_optimizer()
 
-    def forward(self, x):
+    def forward(self, x, y):
         images_test, images_w, images_q, images_k = x
 
         # Train model
         self.model.train()
-        super().forward(x)
+        super().forward(x, y)
 
         # Create the final output prediction
         self.model.eval()
@@ -211,7 +292,7 @@ class AdaContrast(TTAMethod):
         return torch.zeros_like(imgs_test)
 
     @torch.enable_grad()  # ensure grads in possible no grad context for testing
-    def forward_and_adapt(self, x):
+    def forward_and_adapt(self, x, y):
         _, images_w, images_q, images_k = x
 
         self.model.train()
@@ -228,7 +309,38 @@ class AdaContrast(TTAMethod):
                 feats_w, probs_w, self.banks, self.refine_method, self.dist_type, self.num_neighbors
             )
 
-        _, logits_q, logits_ins, keys = self.model(images_q, images_k)
+        _, logits_q, logits_ins, keys, logits_ins_cls, sel_ins_cls = self.model(images_q, images_k, pl=pseudo_labels_w)
+
+        # ------------------ START Active sample selection -------------------------
+        if self.acl_strategy == "random":
+            acl_idx = torch.randint(0, y.shape[0], (self.num_active_samples,))
+        elif self.acl_strategy == "entropy":
+            ent = - torch.sum(probs_w * torch.log(probs_w + 1e-6), dim = 1)
+            ent_sorted, idx_sorted = torch.sort(ent, descending = True)
+            acl_idx = idx_sorted[:self.num_active_samples]
+
+        loss_acl_ce_weak, _ = classification_loss(logits_w[acl_idx], logits_q[acl_idx], y[acl_idx], "weak_weak")
+        loss_acl_ce_strong, _ = classification_loss(logits_w[acl_idx], logits_q[acl_idx], y[acl_idx], "weak_strong")
+
+        pseudo_labels_w[acl_idx] = y[acl_idx]
+
+        self.model.update_active_memory(keys[acl_idx], y[acl_idx])
+        # print(self.model.act_queue_ptr)
+
+        # moco instance discrimination cls wise positives from active sample bank
+        loss_ins_cls = 0
+        if np.sum(sel_ins_cls>-1):
+            # print(logits_ins_cls.shape, pseudo_labels_w[sel_ins_cls>-1].shape, self.model.mem_labels.shape)
+            loss_ins_cls, _ = instance_loss(
+                logits_ins=logits_ins_cls,
+                pseudo_labels=pseudo_labels_w[sel_ins_cls>-1],
+                mem_labels=self.model.act_labels,
+                contrast_type=self.contrast_type,
+            )
+
+        # ------------------ END Active sample selection -------------------------
+
+
         # update key features and corresponding pseudo labels
         self.model.update_memory(keys, pseudo_labels_w)
 
@@ -252,10 +364,15 @@ class AdaContrast(TTAMethod):
             else torch.tensor([0.0]).to("cuda")
         )
 
+        # print(loss_cls, loss_ins, loss_div, loss_acl_ce_weak, loss_acl_ce_strong, loss_ins_cls)
+
         loss = (
             self.alpha * loss_cls
             + self.beta * loss_ins
             + self.eta * loss_div
+            + loss_acl_ce_weak * 0.1
+            + loss_acl_ce_strong * 0.1
+            + loss_ins_cls * 0.1
         )
 
         self.optimizer.zero_grad()

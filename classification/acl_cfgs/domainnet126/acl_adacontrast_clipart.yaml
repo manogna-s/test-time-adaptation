@@ -4,8 +4,8 @@ CORRUPTION:
     - 5
   TYPE:
     - sketch
-    - real
-    - painting
+    # - real
+    # - painting
 MODEL:
   ADAPTATION: acl_adacontrast
   ARCH: resnet50
@@ -21,3 +21,6 @@ CONTRAST:
 TEST:
   BATCH_SIZE: 64
 CKPT_PATH: "./ckpt/domainnet126/best_clipart_2020.pth"
+ACL:
+  STRATEGY: "entropy"
+  NUM_ACTIVE_SAMPLES: 2
