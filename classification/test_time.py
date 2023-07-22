@@ -108,6 +108,7 @@ def evaluate(description):
             logger.info(f"{cfg.CORRUPTION.DATASET} error % [{domain_name}{severity}][#samples={len(test_data_loader.dataset)}]: {err:.2%}")
 
     if len(errs_5) > 0:
+        # logger.info(f"errors: {errs_5: .2f}")
         logger.info(f"mean error: {np.mean(errs):.2%}, mean error at 5: {np.mean(errs_5):.2%}")
     else:
         logger.info(f"mean error: {np.mean(errs):.2%}")

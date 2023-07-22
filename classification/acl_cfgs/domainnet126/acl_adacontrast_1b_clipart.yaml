@@ -7,7 +7,7 @@ CORRUPTION:
     # - real
     # - painting
 MODEL:
-  ADAPTATION: acl_adacontrast
+  ADAPTATION: acl_adacontrast_1b
   ARCH: resnet50
 OPTIM:
   METHOD: SGD

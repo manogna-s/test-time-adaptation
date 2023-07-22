@@ -418,7 +418,8 @@ def adaptation_method_lookup(adaptation):
                     "gtta": "GTTA",
                     "rmt": "RMT",
                     "roid": "ROID",
-                    "acl_adacontrast": "AclAdaContrast"
+                    "acl_adacontrast": "AclAdaContrast",
+                    "acl_adacontrast_1b": "AclAdaContrast_1b"
                     }
     assert adaptation in lookup_table.keys(), \
         f"Adaptation method '{adaptation}' is not supported! Choose from: {list(lookup_table.keys())}"

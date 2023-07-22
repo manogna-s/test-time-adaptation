@@ -23,6 +23,7 @@ from methods.roid import ROID
 
 #Active learning methods
 from acl_methods.acl_adacontrast import AclAdaContrast
+from acl_methods.acl_adacontrast_1b import AclAdaContrast_1b
 
 logger = logging.getLogger(__name__)
 
