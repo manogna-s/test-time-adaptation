@@ -32,12 +32,17 @@ class ACL_TTAMethod(nn.Module):
         self.window_length = cfg.TEST.WINDOW_LENGTH
         self.pointer = torch.tensor([0], dtype=torch.long).cuda()
         # sstta: if the model has no batchnorm layers, we do not need to forward the whole buffer when not performing any updates
-        self.has_bn = any([isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)) for m in model.modules()])
+        self.has_bn = any(
+            [isinstance(m, (nn.BatchNorm1d, nn.BatchNorm2d)) for m in model.modules()])
 
         # note: if the self.model is never reset, like for continual adaptation,
         # then skipping the state copy would save memory
         self.models = [self.model]
         self.model_states, self.optimizer_state = self.copy_model_and_optimizer()
+
+        # active learning parameters
+        self.num_active_samples = cfg.ACL.NUM_ACTIVE_SAMPLES
+        self.acl_strategy = cfg.ACL.STRATEGY
 
     def forward(self, x, y):
         if self.episodic:
@@ -50,11 +55,14 @@ class ACL_TTAMethod(nn.Module):
             if self.input_buffer is None:
                 self.input_buffer = [x_item for x_item in x]
                 # set bn1d layers into eval mode, since no statistics can be extracted from 1 sample
-                self.change_mode_of_batchnorm1d(self.models, to_train_mode=False)
+                self.change_mode_of_batchnorm1d(
+                    self.models, to_train_mode=False)
             elif self.input_buffer[0].shape[0] < self.window_length:
-                self.input_buffer = [torch.cat([self.input_buffer[i], x_item], dim=0) for i, x_item in enumerate(x)]
+                self.input_buffer = [
+                    torch.cat([self.input_buffer[i], x_item], dim=0) for i, x_item in enumerate(x)]
                 # set bn1d layers into train mode
-                self.change_mode_of_batchnorm1d(self.models, to_train_mode=True)
+                self.change_mode_of_batchnorm1d(
+                    self.models, to_train_mode=True)
             else:
                 for i, x_item in enumerate(x):
                     self.input_buffer[i][self.pointer] = x_item
@@ -135,9 +143,11 @@ class ACL_TTAMethod(nn.Module):
             raise NotImplementedError
 
     def print_amount_trainable_params(self):
-        trainable = sum(p.numel() for p in self.params) if len(self.params) > 0 else 0
+        trainable = sum(p.numel()
+                        for p in self.params) if len(self.params) > 0 else 0
         total = sum(p.numel() for p in self.model.parameters())
-        logger.info(f"#Trainable/total parameters: {trainable}/{total} \t Fraction: {trainable / total * 100:.2f}% ")
+        logger.info(
+            f"#Trainable/total parameters: {trainable}/{total} \t Fraction: {trainable / total * 100:.2f}% ")
 
     def reset(self):
         if self.model_states is None or self.optimizer_state is None:
@@ -158,7 +168,8 @@ class ACL_TTAMethod(nn.Module):
 
     @staticmethod
     def copy_model(model):
-        if isinstance(model, ResNetDomainNet126):  # https://github.com/pytorch/pytorch/issues/28594
+        # https://github.com/pytorch/pytorch/issues/28594
+        if isinstance(model, ResNetDomainNet126):
             for module in model.modules():
                 for _, hook in module._forward_pre_hooks.items():
                     if isinstance(hook, WeightNorm):

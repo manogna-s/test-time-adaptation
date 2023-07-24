@@ -55,15 +55,17 @@ class AdaMoCo(nn.Module):
 
         # create the memory bank
         self.register_buffer("mem_feat", torch.randn(feature_dim, K))
-        self.register_buffer("mem_labels", torch.randint(0, src_model.num_classes, (K,)))
+        # self.register_buffer("mem_labels", torch.randint(0, src_model.num_classes, (K,)))
+        self.register_buffer("mem_labels", 1000 *
+                             torch.ones((K,), dtype=torch.long))
         self.mem_feat = F.normalize(self.mem_feat, dim=0)
 
         # create a bank for active samples
         self.act_K = 1000
         self.act_queue_ptr = 0
         self.register_buffer("act_feat", torch.zeros(feature_dim, 1000))
-        self.register_buffer("act_labels", 1000 * torch.ones((1000,), dtype=torch.long))
-
+        self.register_buffer("act_labels", 1000 *
+                             torch.ones((1000,), dtype=torch.long))
 
         if checkpoint_path:
             self.load_from_checkpoint(checkpoint_path)
@@ -73,7 +75,8 @@ class AdaMoCo(nn.Module):
         state_dict = dict()
         for name, param in checkpoint["state_dict"].items():
             # get rid of 'module.' prefix brought by DDP
-            name = name[len("module.") :] if name.startswith("module.") else name
+            name = name[len("module."):] if name.startswith(
+                "module.") else name
             state_dict[name] = param
         msg = self.load_state_dict(state_dict, strict=False)
         logging.info(
@@ -89,7 +92,8 @@ class AdaMoCo(nn.Module):
         for param_q, param_k in zip(
             self.src_model.parameters(), self.momentum_model.parameters()
         ):
-            param_k.data = param_k.data * self.m + param_q.data * (1.0 - self.m)
+            param_k.data = param_k.data * self.m + \
+                param_q.data * (1.0 - self.m)
 
     @torch.no_grad()
     def update_memory(self, keys, pseudo_labels):
@@ -149,7 +153,12 @@ class AdaMoCo(nn.Module):
         # positive logits: Nx1
         l_pos = torch.einsum("nc,nc->n", [q, k]).unsqueeze(-1)
         # negative logits: NxK
-        l_neg = torch.einsum("nc,ck->nk", [q, self.mem_feat.clone().detach()])
+        # l_neg = torch.einsum("nc,ck->nk", [q, self.mem_feat.clone().detach()])
+
+        # ----------------Manogna------------------
+        mem_fea_curr = self.mem_feat[:, self.mem_labels < 1000]
+        l_neg = torch.einsum("nc,ck->nk", [q, mem_fea_curr.clone().detach()])
+        # ----------------Manogna------------------
 
         # logits: Nx(1+K)
         logits_ins = torch.cat([l_pos, l_neg], dim=1)
@@ -159,29 +168,37 @@ class AdaMoCo(nn.Module):
 
         # ---------------------- ACL samples -----------------------
         act_labels = self.act_labels[:self.act_queue_ptr]
-        act_labels = (act_labels.T).expand(q.shape[0] ,-1)
+        act_labels = (act_labels.T).expand(q.shape[0], -1)
 
         logits_ins_cls = None
         sel_idx = np.array([-1])
-        if self.act_queue_ptr>0:
+        if self.act_queue_ptr > 0:
             pl = pl.unsqueeze(1)
             check = (pl == act_labels)
             check = check.cpu().numpy()
-            sel_idx = np.array([np.random.choice(r.nonzero()[0]) if (r.nonzero()[0].any() ==True) else -1 for r in check])
+            sel_idx = np.array([np.random.choice(r.nonzero()[0]) if (
+                r.nonzero()[0].any() == True) else -1 for r in check])
+            # print(np.sum(sel_idx > -1))
 
             if np.sum(sel_idx > -1) > 0:
 
-                q_cls = q[sel_idx>-1]
-                k_cls = (self.act_feat[:, sel_idx].T)[sel_idx>-1]
+                q_cls = q[sel_idx > -1]
+                k_cls = (self.act_feat[:, sel_idx].T)
+                k_cls = k_cls[sel_idx > -1]
+                k_cls = F.normalize(k_cls, dim=1)
 
-                l_pos_cls = torch.einsum("nc,nc->n", [q_cls, k_cls]).unsqueeze(-1)
+                l_pos_cls = torch.einsum(
+                    "nc,nc->n", [q_cls, k_cls]).unsqueeze(-1)
 
-                l_neg_cls = torch.einsum("nc,ck->nk", [q_cls, self.act_feat.clone().detach()])
+                l_neg_cls = torch.einsum(
+                    "nc,ck->nk", [q_cls, self.act_feat.clone().detach()])
+
+                # l_neg_cls = torch.einsum("nc,ck->nk", [q_cls, mem_fea_curr.clone().detach()])
 
                 logits_ins_cls = torch.cat([l_pos_cls, l_neg_cls], dim=1)
+                logits_ins_cls /= self.T_moco
 
         # ---------------------- ACL samples -----------------------
-
 
         # dequeue and enqueue will happen outside
         return feats_q, logits_q, logits_ins, k, logits_ins_cls, sel_idx
@@ -211,10 +228,16 @@ class AclAdaContrast_1b(ACL_TTAMethod):
         self.num_active_samples = cfg.ACL.NUM_ACTIVE_SAMPLES
         self.acl_strategy = cfg.ACL.STRATEGY
 
+        # one bit active learning analysis
+        self.active_selected_samples = 0
+        self.active_labeled_samples = 0
+        self.active_labeled_samples_top2 = 0
+
         self.first_X_samples = 0
 
         if self.dataset_name != "domainnet126":
-            self.src_model = BaseModel(model, cfg.MODEL.ARCH, self.dataset_name)
+            self.src_model = BaseModel(
+                model, cfg.MODEL.ARCH, self.dataset_name)
         else:
             self.src_model = model
 
@@ -222,12 +245,12 @@ class AclAdaContrast_1b(ACL_TTAMethod):
         self.momentum_model = self.copy_model(self.src_model)
 
         self.model = AdaMoCo(
-                        src_model=self.src_model,
-                        momentum_model=self.momentum_model,
-                        K=self.queue_size,
-                        m=self.m,
-                        T_moco=self.T_moco,
-                        ).cuda()
+            src_model=self.src_model,
+            momentum_model=self.momentum_model,
+            K=self.queue_size,
+            m=self.m,
+            T_moco=self.T_moco,
+        ).cuda()
 
         self.banks = {
             "features": torch.tensor([], device="cuda"),
@@ -268,6 +291,7 @@ class AclAdaContrast_1b(ACL_TTAMethod):
         self.model.train()
         feats_w, logits_w = self.model(images_w, cls_only=True)
         with torch.no_grad():
+            # feats_w, logits_w = self.model(images_w, cls_only=True)
             probs_w = F.softmax(logits_w, dim=1)
             if self.first_X_samples >= 1024:
                 self.refine_method = "nearest_neighbors"
@@ -279,49 +303,44 @@ class AclAdaContrast_1b(ACL_TTAMethod):
                 feats_w, probs_w, self.banks, self.refine_method, self.dist_type, self.num_neighbors
             )
 
-        _, logits_q, logits_ins, keys, logits_ins_cls, sel_ins_cls = self.model(images_q, images_k, pl=pseudo_labels_w)
+        _, logits_q, logits_ins, keys, logits_ins_cls, sel_ins_cls = self.model(
+            images_q, images_k, pl=pseudo_labels_w)
 
         # ------------------ START Active sample selection -------------------------
         if self.acl_strategy == "random":
             acl_idx = torch.randint(0, y.shape[0], (self.num_active_samples,))
-        
+
         elif self.acl_strategy == "entropy":
-            ent = - torch.sum(probs_w * torch.log(probs_w + 1e-6), dim = 1)
-            ent_sorted, idx_sorted = torch.sort(ent, descending = True)
+            ent = - torch.sum(probs_w * torch.log(probs_w + 1e-6), dim=1)
+            ent_sorted, idx_sorted = torch.sort(ent, descending=True)
             acl_idx = idx_sorted[:self.num_active_samples]
 
         elif self.acl_strategy == "mhpl":
-            # print(feats_w.shape)
-            # print(self.banks["features"].shape)
-
             if self.banks["features"].shape[0] == 0:
-                acl_idx = torch.randint(0, y.shape[0], (self.num_active_samples,))
+                acl_idx = torch.randint(
+                    0, y.shape[0], (self.num_active_samples,))
             else:
-                cos_sim = torch.matmul(F.normalize(feats_w, dim=1), F.normalize(self.banks["features"], dim=1).T)
+                cos_sim = torch.matmul(F.normalize(feats_w, dim=1), F.normalize(
+                    self.banks["features"], dim=1).T)
                 cos_sim_sorted, idxs = cos_sim.sort(descending=True)
 
                 idxs = idxs[:, : self.num_neighbors]
                 na = (cos_sim_sorted[:, :self.num_neighbors]).mean(1)
 
                 probs_bank = self.banks["probs"]
-                _, bank_preds = torch.max(probs_bank, dim=1)   
-                # print(bank_preds.shape) 
+                _, bank_preds = torch.max(probs_bank, dim=1)
                 preds_nn = bank_preds[idxs]
-                # print(idxs.shape, preds_nn.shape)
-
-                # num_classes = probs.shape[1] 
 
                 pred_dist_nn = torch.zeros_like(logits_w)
                 for c in range(probs_bank.shape[1]):
-                    pred_dist_nn[:, c] = torch.sum(preds_nn==c, dim=1)
+                    pred_dist_nn[:, c] = torch.sum(preds_nn == c, dim=1)
                 pred_dist_nn = pred_dist_nn/10
-                # print(pred_dist_nn)
 
-                nnp = - torch.sum(pred_dist_nn * torch.log(pred_dist_nn + 1e-6), dim = 1)
-                # print(nnp)
+                nnp = - torch.sum(pred_dist_nn *
+                                  torch.log(pred_dist_nn + 1e-6), dim=1)
 
                 neu = nnp * na
-                neu_sorted, idx_sorted = torch.sort(neu, descending = True)
+                neu_sorted, idx_sorted = torch.sort(neu, descending=True)
                 acl_idx = idx_sorted[:self.num_active_samples]
 
                 acl_nn = idxs[acl_idx]
@@ -331,59 +350,73 @@ class AclAdaContrast_1b(ACL_TTAMethod):
                 #     print(acl_idx)
                 #     print(acl_nn)
         # ------------------ END Active sample selection -------------------------
-                
+
         # ----------------------- Use Active sample loss -------------------------
         num_classes = probs_w.shape[1]
 
         one_bit_label = pseudo_labels_w[acl_idx] == y[acl_idx]
-        # print(torch.sum(one_bit_label))
 
-        loss_acl_ce_weak, _ = classification_loss(logits_w[acl_idx][one_bit_label], logits_q[acl_idx][one_bit_label], y[acl_idx][one_bit_label], "weak_weak")
-        loss_acl_ce_strong, _ = classification_loss(logits_w[acl_idx][one_bit_label], logits_q[acl_idx][one_bit_label], y[acl_idx][one_bit_label], "weak_strong")
+        # ------------------analyse active samples --------------------------------
+        self.active_labeled_samples += torch.sum(one_bit_label).item()
+        self.active_selected_samples += 2
+
+        _, sorted_labels = torch.sort(probs_w, dim=1, descending=True)
+        pseudo_labels2_w = sorted_labels[:, 1]
+
+        top2_label = pseudo_labels2_w[acl_idx] == y[acl_idx]
+        self.active_labeled_samples_top2 += torch.sum(top2_label).item()
+        # ------------------analyse active samples --------------------------------
+
+        loss_acl_ce_weak, loss_acl_ce_strong, loss_ins_cls, loss_neg = 0, 0, 0, 0
+
+        if torch.sum(one_bit_label) > 0:
+            loss_acl_ce_weak, _ = classification_loss(
+                logits_w[acl_idx][one_bit_label], logits_q[acl_idx][one_bit_label], y[acl_idx][one_bit_label], "weak_weak")
+            loss_acl_ce_strong, _ = classification_loss(
+                logits_w[acl_idx][one_bit_label], logits_q[acl_idx][one_bit_label], y[acl_idx][one_bit_label], "weak_strong")
 
         pseudo_labels_w[acl_idx] = y[acl_idx]
 
-        self.model.update_active_memory(keys[acl_idx][one_bit_label], y[acl_idx][one_bit_label])
-        # print(self.model.act_queue_ptr)
+        self.model.update_active_memory(
+            keys[acl_idx][one_bit_label], y[acl_idx][one_bit_label])
 
         # moco instance discrimination cls wise positives from active sample bank
-        loss_ins_cls = 0
-        if np.sum(sel_ins_cls>-1):
-            # print(logits_ins_cls.shape, pseudo_labels_w[sel_ins_cls>-1].shape, self.model.mem_labels.shape)
+        if np.sum(sel_ins_cls > -1):
             loss_ins_cls, _ = instance_loss(
                 logits_ins=logits_ins_cls,
-                pseudo_labels=pseudo_labels_w[sel_ins_cls>-1],
+                pseudo_labels=pseudo_labels_w[sel_ins_cls > -1],
                 mem_labels=self.model.act_labels,
                 contrast_type=self.contrast_type,
             )
 
         # negative loss
-        loss_neg = 0 
 
-        negative_sample =  one_bit_label==False 
-        
-        if torch.sum(negative_sample)>0:
+        negative_sample = one_bit_label == False
+
+        if torch.sum(negative_sample) > 0:
             negative_label = pseudo_labels_w[acl_idx][negative_sample]
             probs_negative_label = probs_w[acl_idx][negative_sample]
 
-            confidence_negative_sample, _ = torch.max(probs_w[acl_idx][negative_sample], dim=1)
+            confidence_negative_sample, _ = torch.max(
+                probs_w[acl_idx][negative_sample], dim=1)
             confidence_thresh = 1/num_classes
-            
-            loss_neg = torch.sum( -torch.log(1-confidence_negative_sample) * (confidence_negative_sample > confidence_thresh))
-            # print(loss_neg)
+
+            loss_neg = torch.sum(-torch.log(1-confidence_negative_sample)
+                                 * (confidence_negative_sample > confidence_thresh))
         # ----------------------- Use Active sample loss -------------------------
 
+        # moco instance discrimination
+        loss_ins = 0
+        if torch.sum(self.model.mem_labels < 1000) > 0:
+            loss_ins, _ = instance_loss(
+                logits_ins=logits_ins,
+                pseudo_labels=pseudo_labels_w,
+                mem_labels=self.model.mem_labels[self.model.mem_labels < 1000],
+                contrast_type=self.contrast_type,
+            )
 
         # update key features and corresponding pseudo labels
         self.model.update_memory(keys, pseudo_labels_w)
-
-        # moco instance discrimination
-        loss_ins, _ = instance_loss(
-            logits_ins=logits_ins,
-            pseudo_labels=pseudo_labels_w,
-            mem_labels=self.model.mem_labels,
-            contrast_type=self.contrast_type,
-        )
 
         # classification
         loss_cls, _ = classification_loss(
@@ -397,7 +430,8 @@ class AclAdaContrast_1b(ACL_TTAMethod):
             else torch.tensor([0.0]).to("cuda")
         )
 
-        print(loss_cls, loss_ins, loss_div, loss_acl_ce_weak, loss_acl_ce_strong, loss_ins_cls, loss_neg)
+        print(loss_cls, loss_ins, loss_div, loss_acl_ce_weak,
+              loss_acl_ce_strong, loss_ins_cls, loss_neg, torch.sum(one_bit_label))
 
         loss = (
             self.alpha * loss_cls
@@ -405,8 +439,8 @@ class AclAdaContrast_1b(ACL_TTAMethod):
             + self.eta * loss_div
             + loss_acl_ce_weak * 0.1
             + loss_acl_ce_strong * 0.1
-            + loss_ins_cls * 0.1
-            + loss_neg 
+            # + loss_ins_cls * 0.1
+            # + loss_neg * 0.1
         )
 
         self.optimizer.zero_grad()
@@ -415,7 +449,8 @@ class AclAdaContrast_1b(ACL_TTAMethod):
 
         # use slow feature to update neighbor space
         with torch.no_grad():
-            feats_w, logits_w = self.model.momentum_model(images_w, return_feats=True)
+            feats_w, logits_w = self.model.momentum_model(
+                images_w, return_feats=True)
 
         self.update_labels(feats_w, logits_w)
 
@@ -424,12 +459,12 @@ class AclAdaContrast_1b(ACL_TTAMethod):
     def reset(self):
         super().reset()
         self.model = AdaMoCo(
-                        src_model=self.src_model,
-                        momentum_model=self.momentum_model,
-                        K=self.queue_size,
-                        m=self.m,
-                        T_moco=self.T_moco,
-                        ).cuda()
+            src_model=self.src_model,
+            momentum_model=self.momentum_model,
+            K=self.queue_size,
+            m=self.m,
+            T_moco=self.T_moco,
+        ).cuda()
         self.first_X_samples = 0
         self.banks = {
             "features": torch.tensor([], device="cuda"),
@@ -447,11 +482,14 @@ class AclAdaContrast_1b(ACL_TTAMethod):
         start = self.banks["ptr"]
         end = start + len(features)
         if self.banks["features"].shape[0] < self.queue_size:
-            self.banks["features"] = torch.cat([self.banks["features"], features], dim=0)
-            self.banks["probs"] = torch.cat([self.banks["probs"], probs], dim=0)
+            self.banks["features"] = torch.cat(
+                [self.banks["features"], features], dim=0)
+            self.banks["probs"] = torch.cat(
+                [self.banks["probs"], probs], dim=0)
             self.banks["ptr"] = end % len(self.banks["features"])
         else:
-            idxs_replace = torch.arange(start, end).cuda() % len(self.banks["features"])
+            idxs_replace = torch.arange(
+                start, end).cuda() % len(self.banks["features"])
             self.banks["features"][idxs_replace, :] = features
             self.banks["probs"][idxs_replace, :] = probs
             self.banks["ptr"] = end % len(self.banks["features"])
@@ -575,7 +613,8 @@ def instance_loss(logits_ins, pseudo_labels, mem_labels, contrast_type):
     if contrast_type == "class_aware" and pseudo_labels is not None:
         mask = torch.ones_like(logits_ins, dtype=torch.bool)
         mask[:, 1:] = pseudo_labels.reshape(-1, 1) != mem_labels  # (B, K)
-        logits_ins = torch.where(mask, logits_ins, torch.tensor([float("-inf")]).cuda())
+        logits_ins = torch.where(
+            mask, logits_ins, torch.tensor([float("-inf")]).cuda())
 
     loss = F.cross_entropy(logits_ins, labels_ins)
 
@@ -620,7 +659,8 @@ def diversification_loss(logits_w, logits_s, ce_sup_type):
 def smoothed_cross_entropy(logits, labels, num_classes, epsilon=0):
     log_probs = F.log_softmax(logits, dim=1)
     with torch.no_grad():
-        targets = torch.zeros_like(log_probs).scatter_(1, labels.unsqueeze(1), 1)
+        targets = torch.zeros_like(log_probs).scatter_(
+            1, labels.unsqueeze(1), 1)
         targets = (1 - epsilon) * targets + epsilon / num_classes
     loss = (-targets * log_probs).sum(dim=1).mean()
 
@@ -650,7 +690,8 @@ def get_distances(X, Y, dist_type="euclidean"):
     if dist_type == "euclidean":
         distances = torch.cdist(X, Y)
     elif dist_type == "cosine":
-        distances = 1 - torch.matmul(F.normalize(X, dim=1), F.normalize(Y, dim=1).T)
+        distances = 1 - \
+            torch.matmul(F.normalize(X, dim=1), F.normalize(Y, dim=1).T)
     else:
         raise NotImplementedError(f"{dist_type} distance not implemented.")
 
