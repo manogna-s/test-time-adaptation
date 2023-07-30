@@ -180,13 +180,15 @@ _C.ADACONTRAST = CfgNode()
 
 _C.ADACONTRAST.QUEUE_SIZE = 16384
 _C.ADACONTRAST.CONTRAST_TYPE = "class_aware"
-_C.ADACONTRAST.CE_TYPE = "standard" # ["standard", "symmetric", "smoothed", "soft"]
+# ["standard", "symmetric", "smoothed", "soft"]
+_C.ADACONTRAST.CE_TYPE = "standard"
 _C.ADACONTRAST.ALPHA = 1.0  # lambda for classification loss
 _C.ADACONTRAST.BETA = 1.0   # lambda for instance loss
 _C.ADACONTRAST.ETA = 1.0    # lambda for diversity loss
 
-_C.ADACONTRAST.DIST_TYPE = "cosine" # ["cosine", "euclidean"]
-_C.ADACONTRAST.CE_SUP_TYPE = "weak_strong" # ["weak_all", "weak_weak", "weak_strong", "self_all"]
+_C.ADACONTRAST.DIST_TYPE = "cosine"  # ["cosine", "euclidean"]
+# ["weak_all", "weak_weak", "weak_strong", "self_all"]
+_C.ADACONTRAST.CE_SUP_TYPE = "weak_strong"
 _C.ADACONTRAST.REFINE_METHOD = "nearest_neighbors"
 _C.ADACONTRAST.NUM_NEIGHBORS = 10
 
@@ -243,7 +245,8 @@ _C.SOURCE = CfgNode()
 _C.SOURCE.NUM_WORKERS = 4
 
 # Percentage of source samples used
-_C.SOURCE.PERCENTAGE = 1.0   # [0, 1] possibility to reduce the number of source samples
+# [0, 1] possibility to reduce the number of source samples
+_C.SOURCE.PERCENTAGE = 1.0
 
 # ------------------------------- Testing options --------------------------- #
 _C.TEST = CfgNode()
@@ -325,7 +328,8 @@ def load_cfg_from_args(description="Config options."):
     log_dest = os.path.basename(args.cfg_file)
     log_dest = log_dest.replace('.yaml', '_{}.txt'.format(current_time))
 
-    cfg.SAVE_DIR = os.path.join(cfg.SAVE_DIR, f"{cfg.MODEL.ADAPTATION}_{cfg.CORRUPTION.DATASET}_{current_time}")
+    cfg.SAVE_DIR = os.path.join(
+        cfg.SAVE_DIR, f"{cfg.MODEL.ADAPTATION}_{cfg.CORRUPTION.DATASET}_{current_time}")
     g_pathmgr.mkdirs(cfg.SAVE_DIR)
     cfg.LOG_TIME, cfg.LOG_DEST = current_time, log_dest
     cfg.freeze()
@@ -369,7 +373,8 @@ def complete_data_dir_path(root, dataset_name):
                "imagenet_a": "imagenet-a",
                "imagenet_d": "imagenet-d",      # do not change
                "imagenet_d109": "imagenet-d",   # do not change
-               "domainnet126": "DomainNet-126", # directory containing the 6 splits of "cleaned versions" from http://ai.bu.edu/M3SDA/#dataset
+               # directory containing the 6 splits of "cleaned versions" from http://ai.bu.edu/M3SDA/#dataset
+               "domainnet126": "DomainNet-126",
                "office31": "office-31",
                "officehome": "office-home",
                "visda": "visda-2017",
@@ -419,7 +424,8 @@ def adaptation_method_lookup(adaptation):
                     "rmt": "RMT",
                     "roid": "ROID",
                     "acl_adacontrast": "AclAdaContrast",
-                    "acl_adacontrast_1b": "AclAdaContrast_1b"
+                    "acl_adacontrast_1b": "AclAdaContrast_1b",
+                    "acl_adacontrast_img": 'AclAdaContrast_img'
                     }
     assert adaptation in lookup_table.keys(), \
         f"Adaptation method '{adaptation}' is not supported! Choose from: {list(lookup_table.keys())}"

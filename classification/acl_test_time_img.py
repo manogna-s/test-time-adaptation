@@ -3,7 +3,7 @@ import logging
 import numpy as np
 
 from models.model import get_model
-from acl_utils import get_acl_accuracy, eval_domain_dict
+from acl_utils import get_acl_accuracy_img, eval_domain_dict
 from datasets.data_loading import get_test_loader
 from acl_conf import cfg, load_cfg_from_args, get_num_classes, get_domain_sequence, adaptation_method_lookup
 
@@ -106,7 +106,7 @@ def evaluate(description):
                                                shuffle=False,
                                                workers=min(cfg.TEST.NUM_WORKERS, os.cpu_count()))
 
-            acc, domain_dict = get_acl_accuracy(
+            acc, domain_dict = get_acl_accuracy_img(
                 model, data_loader=test_data_loader, dataset_name=cfg.CORRUPTION.DATASET,
                 domain_name=domain_name, setting=cfg.SETTING, domain_dict=domain_dict)
 
