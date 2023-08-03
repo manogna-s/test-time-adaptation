@@ -29,6 +29,8 @@ MANIFEST
 data/
 output/
 ckpt/
+.vscode/
+wandb/
 
 # PyInstaller
 #  Usually these files are written by a python script from a template

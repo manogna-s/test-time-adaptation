@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
+import wandb
 
 from acl_methods.acl_base import ACL_TTAMethod
 from models.model import BaseModel
@@ -68,12 +69,6 @@ class AdaMoCo(nn.Module):
         self.register_buffer("act_labels", 1000 *
                              torch.ones((1000,), dtype=torch.long))
 
-        self.act_image_bank = {
-            "imgs": torch.tensor([], device="cuda"),
-            "labels": torch.tensor([], device="cuda", dtype=torch.long),
-            "n_imgs": 0
-        }
-
         if checkpoint_path:
             self.load_from_checkpoint(checkpoint_path)
 
@@ -127,15 +122,6 @@ class AdaMoCo(nn.Module):
         self.act_feat[:, idxs_replace] = act_keys.T
         self.act_labels[idxs_replace] = act_labels
         self.act_queue_ptr = end % self.act_K
-
-    def update_active_img_bank(self, act_imgs, act_labels):
-        self.act_image_bank["imgs"] = torch.cat(
-            [self.act_image_bank["imgs"], act_imgs], dim=0)
-        self.act_image_bank["labels"] = torch.cat(
-            [self.act_image_bank["labels"], act_labels], dim=0)
-        self.act_image_bank["n_imgs"] = self.act_image_bank["n_imgs"] + \
-            act_imgs.shape[0]
-        print(self.act_image_bank["imgs"].shape, self.act_image_bank["n_imgs"])
 
     def forward(self, im_q, im_k=None, cls_only=False, pl=None):
         """
@@ -200,15 +186,6 @@ class AdaMoCo(nn.Module):
             # print(np.sum(sel_idx > -1))
 
             if np.sum(sel_idx > -1) > 0:
-                # print(sel_idx)
-                self.momentum_model.eval()
-                with torch.no_grad():
-                    k_img_bank, _ = self.momentum_model(
-                        self.act_image_bank["imgs"][sel_idx[sel_idx > -1]], return_feats=True)
-                    k_img_bank = F.normalize(k_img_bank, dim=1)
-                    k_img_bank = k_img_bank.T
-                    self.act_feat[:, sel_idx[sel_idx > -1]] = k_img_bank
-                self.momentum_model.train()
 
                 q_cls = q[sel_idx > -1]
                 k_cls = (self.act_feat[:, sel_idx].T)
@@ -233,7 +210,7 @@ class AdaMoCo(nn.Module):
         return feats_q, logits_q, logits_ins, k, logits_ins_cls, sel_idx
 
 
-class AclAdaContrast_img(ACL_TTAMethod):
+class AclAdaContrast_analysis(ACL_TTAMethod):
     def __init__(self, cfg, model, num_classes):
         super().__init__(cfg, model, num_classes)
 
@@ -286,6 +263,9 @@ class AclAdaContrast_img(ACL_TTAMethod):
         # then skipping the state copy would save memory
         self.models = [self.src_model, self.momentum_model]
         self.model_states, self.optimizer_state = self.copy_model_and_optimizer()
+
+        # save batch wise analysis
+        self.batch_log = []
 
     def forward(self, x, y):
         images_test, images_w, images_q, images_k = x
@@ -372,8 +352,6 @@ class AclAdaContrast_img(ACL_TTAMethod):
 
                 acl_nn = idxs[acl_idx]
 
-                # print(acl_nn)
-
                 # Neighbor diversity relaxation
                 # if (acl_idx[0] in acl_nn[1]) or (acl_idx[1] in acl_nn[0]):
                 #     print(acl_idx)
@@ -405,20 +383,6 @@ class AclAdaContrast_img(ACL_TTAMethod):
                     contrast_type=self.contrast_type,
                 )
 
-            # print(self.model.act_image_bank["n_imgs"])
-            self.model.update_active_img_bank(images_w[acl_idx], y[acl_idx])
-            # print(self.model.act_image_bank["imgs"].shape, images_w.shape)
-
-            sel_rand = torch.randint(
-                0, self.model.act_image_bank["n_imgs"], (30,))
-
-            act_imgs_saved, act_labels_saved = self.model.act_image_bank[
-                "imgs"][sel_rand], self.model.act_image_bank["labels"][sel_rand]
-            feats_w_act_w, logits_w_act_w = self.model(
-                act_imgs_saved, cls_only=True)
-            loss_acl_img_ce_weak, _ = classification_loss(
-                logits_w_act_w, logits_w_act_w, act_labels_saved, "weak_weak")
-
         # ------------------ END Active sample selection -------------------------
 
         # update key features and corresponding pseudo labels
@@ -449,7 +413,7 @@ class AclAdaContrast_img(ACL_TTAMethod):
         )
 
         # print(loss_cls.item(), loss_ins, loss_div.item())
-        # print(loss_acl_ce_weak.item(), loss_acl_ce_strong.item(), loss_acl_img_ce_weak.item())
+        # print(loss_acl_ce_weak.item(), loss_acl_ce_strong.item(), loss_ins_cls)
 
         loss = (
             self.alpha * loss_cls
@@ -457,7 +421,7 @@ class AclAdaContrast_img(ACL_TTAMethod):
             + self.eta * loss_div
             + loss_acl_ce_weak * 0.1
             + loss_acl_ce_strong * 0.1
-            + loss_acl_img_ce_weak * 0.1  # loss_ins_cls * 0.1
+            # + loss_ins_cls * 0.1
         )
 
         self.optimizer.zero_grad()
@@ -477,7 +441,29 @@ class AclAdaContrast_img(ACL_TTAMethod):
 
         self.update_labels(feats_w, logits_w)
 
-        return [logits_q, acl_idx]
+        # ------------batchwise analysis-------------------
+        _, pre_tta_pred_w = torch.max(logits_w, dim=1)
+        _, pre_tta_pred_s = torch.max(logits_q, dim=1)
+
+        with torch.no_grad():
+            _, logits_w_post_tta = self.model(images_w, cls_only=True)
+            _, logits_s_post_tta = self.model(images_q, cls_only=True)
+
+        _, post_tta_pred_w = torch.max(logits_w_post_tta, dim=1)
+        _, post_tta_pred_s = torch.max(logits_s_post_tta, dim=1)
+
+        pre_tta_acc_w = (pre_tta_pred_w == y).float().mean()
+        pre_tta_acc_s = (pre_tta_pred_s == y).float().mean()
+        post_tta_acc_w = (post_tta_pred_w == y).float().mean()
+        post_tta_acc_s = (post_tta_pred_s == y).float().mean()
+
+        batch_dict = {'pre_tta_acc_w': pre_tta_acc_w, 'pre_tta_acc_s': pre_tta_acc_s,
+                      'post_tta_acc_w': post_tta_acc_w, 'post_tta_acc_s': post_tta_acc_s}
+        self.batch_log.append(batch_dict)
+        wandb.log(batch_dict)
+        # ------------batchwise analysis-------------------
+
+        return logits_w
 
     def reset(self):
         super().reset()
