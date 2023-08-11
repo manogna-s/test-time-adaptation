@@ -153,10 +153,15 @@ class AdaMoCo(nn.Module):
         # Einstein sum is more intuitive
         # positive logits: Nx1
         l_pos = torch.einsum("nc,nc->n", [q, k]).unsqueeze(-1)
-        # negative logits: NxK
-        l_neg = torch.einsum("nc,ck->nk", [q, self.mem_feat.clone().detach()])
+
+        # negative logits: NxK                                                          Original code
+        # l_neg = torch.einsum("nc,ck->nk", [q, self.mem_feat.clone().detach()])        It's wrong!!
 
         # ----------------Manogna------------------
+        # # update key features and corresponding pseudo labels
+        # self.update_memory(keys=k, pseudo_labels=pl)
+
+        # Only use feature bank updated until now!! Not the randomly initialized junk;/
         mem_fea_curr = self.mem_feat[:, self.mem_labels < 1000]
         l_neg = torch.einsum("nc,ck->nk", [q, mem_fea_curr.clone().detach()])
 
@@ -205,7 +210,7 @@ class AdaMoCo(nn.Module):
 
         # ---------------------- ACL samples -----------------------
 
-        # dequeue and enqueue will happen outside
+        # dequeue and enqueue is now happening inside:P # will happen outside
         return feats_q, logits_q, logits_ins, k, logits_ins_cls, sel_idx
 
 
@@ -337,7 +342,7 @@ class AclAdaContrast(ACL_TTAMethod):
                 pred_dist_nn = torch.zeros_like(logits_w)
                 for c in range(probs.shape[1]):
                     pred_dist_nn[:, c] = torch.sum(preds_nn == c, dim=1)
-                pred_dist_nn = pred_dist_nn/10
+                pred_dist_nn = pred_dist_nn/10  # self.num_neighbors
 
                 nnp = - torch.sum(pred_dist_nn *
                                   torch.log(pred_dist_nn + 1e-6), dim=1)
@@ -352,6 +357,42 @@ class AclAdaContrast(ACL_TTAMethod):
                 # if (acl_idx[0] in acl_nn[1]) or (acl_idx[1] in acl_nn[0]):
                 #     print(acl_idx)
                 #     print(acl_nn)
+        elif self.acl_strategy == "ours":
+            if self.banks["features"].shape[0] == 0:
+                acl_idx = torch.randint(
+                    0, y.shape[0], (self.num_active_samples,))
+            else:
+                cos_sim = torch.matmul(F.normalize(
+                    feats_w, dim=1), F.normalize(feats_w, dim=1).T)
+                cos_sim_sorted, idxs = cos_sim.sort(descending=True)
+
+                idxs = idxs[:, : self.num_neighbors]
+                na = (cos_sim_sorted[:, :self.num_neighbors]).mean(1)
+
+                probs = logits_w.softmax(1)
+                _, sample_preds = torch.max(probs, dim=1)
+                preds_nn = sample_preds[idxs]
+
+                num_classes = probs.shape[1]
+
+                # pred_dist_nn = torch.zeros_like(logits_w)
+                # for c in range(num_classes):
+                #     pred_dist_nn[:, c] = torch.sum(preds_nn == c, dim=1)
+                # pred_dist_nn = pred_dist_nn/self.num_neighbors
+
+                # nnp = - torch.sum(pred_dist_nn * torch.log(pred_dist_nn + 1e-6), dim=1)
+
+                nnp = torch.sum(sample_preds.unsqueeze(1) ==
+                                preds_nn)/self.num_neighbors
+
+                ent = -torch.sum(probs * torch.log(probs+1e-6),
+                                 dim=1) / np.log(num_classes)
+
+                neu = nnp * ent
+                neu_sorted, idx_sorted = torch.sort(neu, descending=True)
+                acl_idx = idx_sorted[:self.num_active_samples]
+
+                acl_nn = idxs[acl_idx]
 
         if True:
 
@@ -370,19 +411,16 @@ class AclAdaContrast(ACL_TTAMethod):
 
             # moco instance discrimination cls wise positives from active sample bank
             loss_ins_cls = 0
-            if np.sum(sel_ins_cls > -1):
-                loss_ins_cls, _ = instance_loss(
-                    logits_ins=logits_ins_cls,
-                    pseudo_labels=pseudo_labels_w[sel_ins_cls > -1],
-                    # mem_labels[self.model.mem_labels<1000],
-                    mem_labels=self.model.act_labels,
-                    contrast_type=self.contrast_type,
-                )
+            # if np.sum(sel_ins_cls > -1):
+            #     loss_ins_cls, _ = instance_loss(
+            #         logits_ins=logits_ins_cls,
+            #         pseudo_labels=pseudo_labels_w[sel_ins_cls > -1],
+            #         # mem_labels[self.model.mem_labels<1000],
+            #         mem_labels=self.model.act_labels,
+            #         contrast_type=self.contrast_type,
+            #     )
 
         # ------------------ END Active sample selection -------------------------
-
-        # update key features and corresponding pseudo labels
-        # self.model.update_memory(keys, pseudo_labels_w)
 
         # moco instance discrimination
         loss_ins = 0
@@ -394,6 +432,7 @@ class AclAdaContrast(ACL_TTAMethod):
                 contrast_type=self.contrast_type,
             )
 
+        # update key features and corresponding pseudo labels
         self.model.update_memory(keys, pseudo_labels_w)
 
         # classification

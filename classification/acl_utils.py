@@ -89,6 +89,41 @@ def get_acl_accuracy(model: torch.nn.Module,
     return accuracy, domain_dict
 
 
+def get_acl_split_accuracy(model: torch.nn.Module,
+                           data_loader: torch.utils.data.DataLoader,
+                           dataset_name: str,
+                           domain_name: str,
+                           setting: str,
+                           domain_dict: dict,
+                           device: torch.device = None):
+
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    correct = 0.
+    with torch.no_grad():
+        for i, data in enumerate(data_loader):
+            imgs, labels = data[0], data[1]
+
+            output = model([img.to(device) for img in imgs], labels.to(device)) if isinstance(
+                imgs, list) else model(imgs.to(device), labels.to(device))
+            predictions = output.argmax(1)
+
+            if dataset_name == "imagenet_d" and domain_name != "none":
+                mapping_vector = list(IMAGENET_D_MAPPING.values())
+                predictions = torch.tensor(
+                    [mapping_vector[pred] for pred in predictions], device=device)
+
+            correct += (predictions == labels.to(device)).float().sum()
+
+            if "mixed_domains" in setting and len(data) >= 3:
+                domain_dict = split_results_by_domain(
+                    domain_dict, data, predictions)
+
+    accuracy = correct.item() / len(data_loader.dataset)
+    return accuracy, domain_dict
+
+
 def get_acl_accuracy_img(model: torch.nn.Module,
                          data_loader: torch.utils.data.DataLoader,
                          dataset_name: str,

@@ -1,7 +1,10 @@
 import logging
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.nn.utils.weight_norm import WeightNorm
+import wandb
+import numpy as np
 
 from copy import deepcopy
 from models.model import ResNetDomainNet126
@@ -43,6 +46,17 @@ class ACL_TTAMethod(nn.Module):
         # active learning parameters
         self.num_active_samples = cfg.ACL.NUM_ACTIVE_SAMPLES
         self.acl_strategy = cfg.ACL.STRATEGY
+
+        # source like feature bank for active learning
+        self.acl_bank = {
+            "features": torch.tensor([], device="cuda"),
+            "probs": torch.tensor([], device="cuda"),
+            "labels": torch.tensor([], device="cuda", dtype=torch.long)
+        }
+
+        # save batch wise analysis
+        self.n_correct = {'act': 0, 'others': 0, 'all': 0, 'act_nn': 0}
+        self.n_samples = {'act': 0, 'others': 0, 'all': 0, 'act_nn': 0}
 
     def forward(self, x, y):
         if self.episodic:
@@ -97,6 +111,135 @@ class ACL_TTAMethod(nn.Module):
         """Forward and adapt model on batch of data.
         """
         raise NotImplementedError
+
+    def active_sample_selection(self, feats_w, logits_w, probs_w):
+        if self.acl_strategy == "random":
+            acl_idx = torch.randint(
+                0, feats_w.shape[0], (self.num_active_samples,))
+
+        elif self.acl_strategy == "entropy":
+            ent = - torch.sum(probs_w * torch.log(probs_w + 1e-6), dim=1)
+            ent_sorted, idx_sorted = torch.sort(ent, descending=True)
+            acl_idx = idx_sorted[:self.num_active_samples]
+
+        elif self.acl_strategy == "mhpl":
+
+            # acl nn using feature bank
+            cos_sim = torch.matmul(F.normalize(feats_w, dim=1), F.normalize(
+                self.acl_bank["features"], dim=1).T)
+            cos_sim_sorted, idxs = cos_sim.sort(descending=True)
+            cos_sim_sorted, idxs = cos_sim_sorted[:, 1:], idxs[:, 1:]
+
+            idxs = idxs[:, :self.num_neighbors]
+            na = (cos_sim_sorted[:, :self.num_neighbors]).mean(1)
+
+            probs = self.acl_bank["probs"]
+            _, bank_preds = torch.max(probs, dim=1)
+            preds_nn = bank_preds[idxs]
+
+            # num_classes = probs.shape[1]
+
+            pred_dist_nn = torch.zeros_like(logits_w)
+            for c in range(probs.shape[1]):
+                pred_dist_nn[:, c] = torch.sum(preds_nn == c, dim=1)
+            pred_dist_nn = pred_dist_nn/self.num_neighbors
+
+            nnp = - torch.sum(pred_dist_nn *
+                                torch.log(pred_dist_nn + 1e-6), dim=1)
+            
+            ent = - torch.sum(probs_w * torch.log(probs_w + 1e-6), dim=1)
+
+            neu = na * ent # nnp * na
+            neu_sorted, idx_sorted = torch.sort(neu, descending=True)
+            acl_idx = idx_sorted[:self.num_active_samples]
+
+        elif self.acl_strategy == "ours":
+            if self.acl_bank["features"].shape[0] == 0:
+                acl_idx = torch.randint(
+                    0, y.shape[0], (self.num_active_samples,))
+                cos_sim = torch.matmul(F.normalize(feats_w, dim=1), F.normalize(
+                    feats_w, dim=1).T)
+                cos_sim_sorted, idxs = cos_sim.sort(descending=True)
+                cos_sim_sorted, idxs = cos_sim_sorted[:, 1:], idxs[:, 1:]
+
+                bank_preds = logits_w.argmax(1)
+
+                idxs = idxs[:, : self.num_neighbors]
+            else:
+                cos_sim = torch.matmul(F.normalize(
+                    feats_w, dim=1), F.normalize(feats_w, dim=1).T)
+                cos_sim_sorted, idxs = cos_sim.sort(descending=True)
+                cos_sim_sorted, idxs = cos_sim_sorted[:, 1:], idxs[:, 1:]
+
+                idxs = idxs[:, :self.num_neighbors]
+                na = (cos_sim_sorted[:, :self.num_neighbors]).mean(1)
+
+                probs = logits_w.softmax(1)
+                _, sample_preds = torch.max(probs, dim=1)
+                preds_nn = sample_preds[idxs]
+
+                num_classes = probs.shape[1]
+
+                pred_dist_nn = torch.zeros_like(logits_w)
+                for c in range(num_classes):
+                    pred_dist_nn[:, c] = torch.sum(preds_nn == c, dim=1)
+                pred_dist_nn = pred_dist_nn/self.num_neighbors
+
+                # nnp = - torch.sum(pred_dist_nn * torch.log(pred_dist_nn + 1e-6), dim=1)
+
+                nnp = torch.sum(sample_preds.unsqueeze(1) ==
+                                preds_nn, dim=1)/self.num_neighbors
+
+                nnp = (np.log(self.num_neighbors) + torch.sum(pred_dist_nn *
+                       torch.log(pred_dist_nn + 1e-6), dim=1)) / np.log(self.num_neighbors)
+
+                ent = -torch.sum(probs * torch.log(probs+1e-6),
+                                 dim=1) / np.log(num_classes)
+
+                neu = nnp * ent * na
+                neu_sorted, idx_sorted = torch.sort(neu, descending=True)
+                acl_idx = idx_sorted[:self.num_active_samples]
+
+        cos_sim_batch = torch.matmul(F.normalize(
+            feats_w, dim=1), F.normalize(feats_w, dim=1).T)
+        cos_sim_batch_sorted, idxs_batch = cos_sim_batch.sort(descending=True)
+        cos_sim_batch_sorted, idxs_batch = cos_sim_batch_sorted[:,
+                                                                1:], idxs_batch[:, 1:]
+        idxs_batch = idxs_batch[:, : self.num_neighbors]
+        acl_nn_batch = idxs_batch[acl_idx]
+
+        return acl_idx, acl_nn_batch
+
+    @torch.no_grad()
+    def post_tta_analysis(self, images_test, y, acl_idx, acl_nn_batch):
+        self.model.eval()
+        _, logits = self.model(images_test, cls_only=True)
+        post_preds = logits.argmax(1)
+        post_batch_acc = (post_preds == y).float().sum()
+
+        post_act = post_preds[acl_idx]
+        post_act_nn_batch = post_preds[acl_nn_batch]
+        post_act_acc = (post_act == y[acl_idx]).float()
+        post_act_nn_batch_acc = (post_act_nn_batch == y[acl_nn_batch]).float()
+
+        self.n_correct['act'] += post_act_acc.sum().cpu().item()
+        self.n_correct['others'] += post_batch_acc.sum().cpu().item() - \
+            post_act_acc.sum().cpu().item()
+        self.n_correct['all'] += post_batch_acc.sum().cpu().item()
+        self.n_correct['act_nn'] += post_act_nn_batch_acc.sum().cpu().item()
+
+        self.n_samples['act'] += self.num_active_samples
+        self.n_samples['others'] += images_test.shape[0] - \
+            self.num_active_samples
+        self.n_samples['all'] += images_test.shape[0]
+
+        batch_acl_dict = {'act_correct': self.n_correct['act'], 'others_correct': self.n_correct['others'],
+                          'all_correct': self.n_correct['all'], 'act_nn_correct': self.n_correct['act_nn']}
+
+        batch_acc_dict = {'act': self.n_correct['act']/self.n_samples['act'], 'others': self.n_correct['others'] /
+                          self.n_samples['others'], 'all': self.n_correct['all']/self.n_samples['all']}
+        wandb.log(batch_acc_dict)
+        return
 
     @torch.no_grad()
     def forward_sliding_window(self, x):

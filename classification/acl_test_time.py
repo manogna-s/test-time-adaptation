@@ -2,6 +2,7 @@ import os
 import logging
 import numpy as np
 import wandb
+import torch
 
 from models.model import get_model
 from acl_utils import get_acl_accuracy, eval_domain_dict
@@ -27,6 +28,7 @@ from acl_methods.acl_adacontrast import AclAdaContrast
 from acl_methods.acl_adacontrast_1b import AclAdaContrast_1b
 from acl_methods.acl_adacontrast_img import AclAdaContrast_img
 from acl_methods.acl_adacontrast_analysis import AclAdaContrast_analysis
+from acl_methods.acl_adacontrast_feagen import AclAdaContrast_feagen
 
 logger = logging.getLogger(__name__)
 
@@ -81,7 +83,7 @@ def evaluate(description):
     source_domain = cfg.CKPT_PATH.split('_')[1][0]
 
     wandb.init(project="domainnet", entity="acl-tta", save_code=True,
-               group=f'{cfg.MODEL.ADAPTATION}', tags=[cfg.MODEL.ADAPTATION],  name=f'{cfg.MODEL.ADAPTATION}_acl{cfg.ACL.STRATEGY}{cfg.ACL.NUM_ACTIVE_SAMPLES}_{source_domain}2{dom_names_loop[0]}')
+               group=f'{cfg.MODEL.ADAPTATION}', tags=[cfg.MODEL.ADAPTATION, cfg.ACL.STRATEGY],  name=f'{cfg.MODEL.ADAPTATION}_acl{cfg.ACL.STRATEGY}{cfg.ACL.NUM_ACTIVE_SAMPLES}_{source_domain}2{dom_names_loop[0]}')
     # k_art = wandb.Artifact(f'src', type="model")
 
     errs = []
