@@ -206,7 +206,7 @@ class AclAdaContrast_feagen(ACL_TTAMethod):
             "ptr": 0
         }
 
-        self.num_features_per_cls = 50
+        self.num_features_per_cls = 20
 
         if self.acl_strategy not in ['random', 'entropy']:
             # self.pseudo_generate_source_features(self.src_model.fc)
@@ -237,7 +237,7 @@ class AclAdaContrast_feagen(ACL_TTAMethod):
             loss_ent = torch.mean(
                 torch.sum(-scores * torch.log(scores + 1e-6), dim=1))
             loss_div = div(logits)
-            print(loss_ent.item(), loss_div.item())
+            # print(loss_ent.item(), loss_div.item())
             loss = 0.5 * loss_ent + loss_div * 5
             loss.backward()
             optim_feats.step()
@@ -264,64 +264,33 @@ class AclAdaContrast_feagen(ACL_TTAMethod):
         num_classes = classifier.out_features
 
         protos = F.normalize(classifier.weight, dim=1)
-        
+
         norm = 15
         # proto_scores = nn.Softmax(dim=1)(classifier(protos * norm))
-        # proto_maxprobs, proto_label_bank = torch.max(proto_scores, dim=1)    
+        # proto_maxprobs, proto_label_bank = torch.max(proto_scores, dim=1)
 
         fea_bank, prob_bank, label_bank = [], [], []
         for c in range(num_classes):
-            class_dist = torch.distributions.normal.Normal(protos[c].cuda(), 0.05)
+            class_dist = torch.distributions.normal.Normal(
+                protos[c].cuda(), 0.05)
             c_feats = class_dist.sample_n(self.num_features_per_cls)
             c_feats = F.normalize(c_feats, dim=1)
             cos_sim = torch.matmul(protos, c_feats.T)
-            print(f'class {c}; cos_sim(proto, f): {cos_sim[c]}') # ; max sim with other class: {cos_sim[1:, :].max()}')
-        
+            # ; max sim with other class: {cos_sim[1:, :].max()}')
+            print(f'class {c}; cos_sim(proto, f): {cos_sim[c]}')
+
             c_feats_scores = nn.Softmax(dim=1)(classifier(c_feats * norm))
-            c_feats_maxprobs, c_feats_label_bank = torch.max(c_feats_scores, dim=1)
+            c_feats_maxprobs, c_feats_label_bank = torch.max(
+                c_feats_scores, dim=1)
             fea_bank.append(c_feats)
             prob_bank.append(c_feats_scores)
             label_bank.append(c_feats_label_bank)
             assert (c_feats_label_bank != c).sum() == 0
-            
+
         self.acl_bank["features"] = torch.vstack(fea_bank)
         self.acl_bank["probs"] = torch.vstack(prob_bank)
         self.acl_bank["labels"] = torch.stack(label_bank).flatten()
-        
-        # ------
-        # protos = classifier.weight_g * \
-        # nn.functional.normalize(classifier.weight_v)
-        # protos = classifier.weight
-        # proto_scores = nn.Softmax(dim=1)(classifier(protos))
-        # proto_maxprobs, proto_label_bank = torch.max(proto_scores, dim=1)
 
-        # l2_distance = torch.cdist(
-        #     protos.unsqueeze(0)*17, protos.unsqueeze(0)*17)
-        # var = torch.min(l2_distance[l2_distance > 0])
-        # lmda = 1
-        # var = var * lmda
-        # var = 5
-        # print(f'var:{var}')
-
-        # protos = 17 * nn.functional.normalize(classifier.weight_v)
-        # pseudo_feats = []
-        # for c in range(num_classes):
-        #     class_dist = torch.distributions.normal.Normal(
-        #         protos[c].cuda(), var)
-        #     print((class_dist.sample()).norm(2))
-        #     c_feats = class_dist.sample_n(self.num_features_per_cls)
-        #     pseudo_feats.append(c_feats)
-        #     print(
-        #         f'class {c}: proto norm: {protos[c].norm(2)};  sampled feats norm: {c_feats.norm(2,1)}')
-        # pseudo_feats = torch.cat(pseudo_feats, dim=0)
-
-        # pseudo_scores = nn.Softmax(dim=1)(classifier(pseudo_feats))
-        # pseudo_maxprobs, pseudo_label_bank = torch.max(pseudo_scores, dim=1)
-        # pseudo_norms = pseudo_feats.norm(2, 1)
-
-        # self.acl_bank["features"] = pseudo_feats.detach().clone()
-        # self.acl_bank["probs"] = pseudo_scores.detach().clone()
-        # self.acl_bank["labels"] = pseudo_label_bank.detach().clone()
         return
 
     def forward(self, x, y):
@@ -366,7 +335,6 @@ class AclAdaContrast_feagen(ACL_TTAMethod):
 
         _, logits_q, logits_ins, keys = self.model(
             images_q, images_k, pl=pseudo_labels_w)
-
 
         acl_idx, acl_nn_batch = self.active_sample_selection(
             feats_w, logits_w, probs_w)

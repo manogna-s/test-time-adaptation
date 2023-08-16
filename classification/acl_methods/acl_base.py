@@ -9,6 +9,8 @@ import numpy as np
 from copy import deepcopy
 from models.model import ResNetDomainNet126
 
+from utils import plot_tsne
+
 
 logger = logging.getLogger(__name__)
 
@@ -145,60 +147,48 @@ class ACL_TTAMethod(nn.Module):
             pred_dist_nn = pred_dist_nn/self.num_neighbors
 
             nnp = - torch.sum(pred_dist_nn *
-                                torch.log(pred_dist_nn + 1e-6), dim=1)
-            
+                              torch.log(pred_dist_nn + 1e-6), dim=1)
+
             ent = - torch.sum(probs_w * torch.log(probs_w + 1e-6), dim=1)
 
-            neu = na * ent # nnp * na
+            neu = nnp * na
             neu_sorted, idx_sorted = torch.sort(neu, descending=True)
             acl_idx = idx_sorted[:self.num_active_samples]
 
         elif self.acl_strategy == "ours":
-            if self.acl_bank["features"].shape[0] == 0:
-                acl_idx = torch.randint(
-                    0, y.shape[0], (self.num_active_samples,))
-                cos_sim = torch.matmul(F.normalize(feats_w, dim=1), F.normalize(
-                    feats_w, dim=1).T)
-                cos_sim_sorted, idxs = cos_sim.sort(descending=True)
-                cos_sim_sorted, idxs = cos_sim_sorted[:, 1:], idxs[:, 1:]
+            cos_sim = torch.matmul(F.normalize(
+                feats_w, dim=1), F.normalize(feats_w, dim=1).T)
+            cos_sim_sorted, idxs = cos_sim.sort(descending=True)
+            cos_sim_sorted, idxs = cos_sim_sorted[:, 1:], idxs[:, 1:]
 
-                bank_preds = logits_w.argmax(1)
+            idxs = idxs[:, :self.num_neighbors]
+            na = (cos_sim_sorted[:, :self.num_neighbors]).mean(1)
 
-                idxs = idxs[:, : self.num_neighbors]
-            else:
-                cos_sim = torch.matmul(F.normalize(
-                    feats_w, dim=1), F.normalize(feats_w, dim=1).T)
-                cos_sim_sorted, idxs = cos_sim.sort(descending=True)
-                cos_sim_sorted, idxs = cos_sim_sorted[:, 1:], idxs[:, 1:]
+            probs = logits_w.softmax(1)
+            _, sample_preds = torch.max(probs, dim=1)
+            preds_nn = sample_preds[idxs]
 
-                idxs = idxs[:, :self.num_neighbors]
-                na = (cos_sim_sorted[:, :self.num_neighbors]).mean(1)
+            num_classes = probs.shape[1]
 
-                probs = logits_w.softmax(1)
-                _, sample_preds = torch.max(probs, dim=1)
-                preds_nn = sample_preds[idxs]
+            pred_dist_nn = torch.zeros_like(logits_w)
+            for c in range(num_classes):
+                pred_dist_nn[:, c] = torch.sum(preds_nn == c, dim=1)
+            pred_dist_nn = pred_dist_nn/self.num_neighbors
 
-                num_classes = probs.shape[1]
+            # nnp = - torch.sum(pred_dist_nn * torch.log(pred_dist_nn + 1e-6), dim=1)
 
-                pred_dist_nn = torch.zeros_like(logits_w)
-                for c in range(num_classes):
-                    pred_dist_nn[:, c] = torch.sum(preds_nn == c, dim=1)
-                pred_dist_nn = pred_dist_nn/self.num_neighbors
+            nnp = torch.sum(sample_preds.unsqueeze(1) ==
+                            preds_nn, dim=1)/self.num_neighbors
 
-                # nnp = - torch.sum(pred_dist_nn * torch.log(pred_dist_nn + 1e-6), dim=1)
+            nnp = (np.log(self.num_neighbors) + torch.sum(pred_dist_nn *
+                                                          torch.log(pred_dist_nn + 1e-6), dim=1)) / np.log(self.num_neighbors)
 
-                nnp = torch.sum(sample_preds.unsqueeze(1) ==
-                                preds_nn, dim=1)/self.num_neighbors
+            ent = -torch.sum(probs * torch.log(probs+1e-6),
+                             dim=1) / np.log(num_classes)
 
-                nnp = (np.log(self.num_neighbors) + torch.sum(pred_dist_nn *
-                       torch.log(pred_dist_nn + 1e-6), dim=1)) / np.log(self.num_neighbors)
-
-                ent = -torch.sum(probs * torch.log(probs+1e-6),
-                                 dim=1) / np.log(num_classes)
-
-                neu = nnp * ent * na
-                neu_sorted, idx_sorted = torch.sort(neu, descending=True)
-                acl_idx = idx_sorted[:self.num_active_samples]
+            neu = nnp * ent * na
+            neu_sorted, idx_sorted = torch.sort(neu, descending=True)
+            acl_idx = idx_sorted[:self.num_active_samples]
 
         cos_sim_batch = torch.matmul(F.normalize(
             feats_w, dim=1), F.normalize(feats_w, dim=1).T)
@@ -213,7 +203,7 @@ class ACL_TTAMethod(nn.Module):
     @torch.no_grad()
     def post_tta_analysis(self, images_test, y, acl_idx, acl_nn_batch):
         self.model.eval()
-        _, logits = self.model(images_test, cls_only=True)
+        feats, logits = self.model(images_test, cls_only=True)
         post_preds = logits.argmax(1)
         post_batch_acc = (post_preds == y).float().sum()
 
@@ -239,6 +229,9 @@ class ACL_TTAMethod(nn.Module):
         batch_acc_dict = {'act': self.n_correct['act']/self.n_samples['act'], 'others': self.n_correct['others'] /
                           self.n_samples['others'], 'all': self.n_correct['all']/self.n_samples['all']}
         wandb.log(batch_acc_dict)
+
+        # plot_tsne(fea_bank=self.acl_bank["features"], label_bank=self.acl_bank["labels"],
+        #           fea_batch=feats, preds_batch=post_preds, labels_batch=y, acl_idx=acl_idx, acl_nn_batch=acl_nn_batch)
         return
 
     @torch.no_grad()
